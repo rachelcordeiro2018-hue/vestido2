@@ -1,0 +1,109 @@
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  width: 100%;
+  padding: 1rem 1.5rem;
+  background: transparent;
+}
+
+.navbar-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+.navbar-left, .navbar-right {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex: 1;
+}
+
+.navbar-right {
+  justify-content: flex-end;
+}
+
+.navbar-center {
+  display: flex;
+  justify-content: center;
+  flex: 1;
+}
+
+.brand-name {
+  font-size: 2.5rem;
+  font-weight: 900;
+  letter-spacing: -0.05em;
+  color: white;
+  text-transform: lowercase;
+}
+
+.brand-name span {
+  font-size: 1.5rem;
+  vertical-align: super;
+}
+
+.avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid rgba(255,255,255,0.6);
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.avatar:hover {
+  transform: scale(1.05);
+}
+
+.avatar-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.status-indicator {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 14px;
+  height: 14px;
+  background-color: transparent;
+  border-radius: 50%;
+}
+
+.menu-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  width: 40px;
+  height: 32px;
+  border-radius: 4px;
+}
+
+.tooltip-wrapper {
+  position: relative;
+}
+
+.tooltip-content {
+  display: none;
+  position: absolute;
+  top: 110%;
+  left: 0;
+  background: rgba(0,0,0,0.8);
+  color: white;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.tooltip-wrapper:hover .tooltip-content {
+  display: block;
+}
+
+.tooltip-content:hover {
+  background: #ef4444;
+}
