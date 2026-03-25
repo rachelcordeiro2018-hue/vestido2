@@ -23,7 +23,9 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
 
   const [isApiReady, setIsApiReady] = useState(false);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
+  
   const [hostPaused, setHostPaused] = useState(false); 
+  const hostPausedRef = useRef(false); // Ref para evitar recriar o player
   
   const isRemoteChange = useRef<boolean>(false);
   const [roomState, setRoomState] = useState<any>(roomData || null);
@@ -63,7 +65,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     }
   }, [roomId]);
 
-  // Se o componente Pai (Room) mandar um video_id novo, atuamos nele:
+  // ESSENCIAL: Permite que o Host troque de vídeo ao clicar na Fila
   useEffect(() => {
     if (roomData && roomState && roomData.video_id !== roomState.video_id) {
       setRoomState((prev: any) => ({ ...prev, video_id: roomData.video_id, current_video_time: roomData.current_video_time || 0 }));
@@ -92,7 +94,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     return () => { channel.unsubscribe(); };
   }, [roomId, isHost, isPlayerReady]);
 
-  // 3. Inicializa o Player
+  // 4. Inicializa o Player
   useEffect(() => {
     if (!isApiReady || !roomState?.video_id || playerRef.current) return;
 
@@ -102,8 +104,8 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       height: '100%',
       playerVars: {
         autoplay: roomState.is_playing ? 1 : 0,
-        controls: 1, // Habilitado para todos poderem mexer no VOLUME
-        disablekb: isHost ? 0 : 1, // Desabilita teclado para visitantes (espaço não pausa)
+        controls: 1, 
+        disablekb: isHost ? 0 : 1, 
         rel: 0,
         modestbranding: 1,
         enablejsapi: 1
@@ -128,10 +130,15 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
 
           // LÓGICA PARA O VISITANTE (BLOQUEIO DE PAUSA MANUAL)
           if (!isHost && !isRemoteChange.current) {
-            // Se o visitante pausar mas o Host estiver em modo PLAY (hostPaused = false)
-            if (event.data === window.YT.PlayerState.PAUSED && !hostPaused) {
+            // Usa as referências atuais para evitar destruição do iframe
+            if (event.data === window.YT.PlayerState.PAUSED && !hostPausedRef.current) {
               playerRef.current.playVideo(); // Força o play novamente
             }
+          }
+          
+          // Trata evento de OnEnded (Fila de preprodução)
+          if (event.data === window.YT.PlayerState.ENDED && isHost && onEnded) {
+            onEnded();
           }
         }
       }
@@ -139,10 +146,11 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
 
     return () => {
       if (playerRef.current?.destroy) playerRef.current.destroy();
+      playerRef.current = null;
     };
-  }, [isApiReady, roomState?.video_id, hostPaused]); // Dependência hostPaused importante aqui
+  }, [isApiReady, roomState?.video_id]); // Removido hostPaused do array para evitar destruir o iframe
 
-  // 4. Função de Broadcast (Host -> Visitantes)
+  // 5. Função de Broadcast (Host -> Visitantes)
   const broadcastState = (playingOverride?: boolean) => {
     if (!isHost || !playerRef.current || !channelRef.current || !isPlayerReady) return;
     
@@ -151,12 +159,18 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       ? playingOverride 
       : (pState === window.YT.PlayerState.PLAYING);
     
+    // Fallback: se getVideoData falhar durante destruição/recriação do Iframe
+    let currentVideoId = roomState?.video_id;
+    try {
+      currentVideoId = playerRef.current.getVideoData().video_id;
+    } catch(e) {}
+
     channelRef.current.send({
       type: 'broadcast',
       event: 'player_sync',
       payload: {
-        video_id: playerRef.current.getVideoData().video_id,
-        current_video_time: playerRef.current.getCurrentTime(),
+        video_id: currentVideoId,
+        current_video_time: playerRef.current.getCurrentTime() || 0,
         is_playing: isPlaying,
         sentAt: Date.now()
       }
@@ -175,14 +189,29 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     return () => clearInterval(interval);
   }, [isHost, isPlayerReady]);
 
-  // 5. Lógica de Sincronização (Visitante)
+  // 6. Lógica de Sincronização (Visitante)
   const syncPlayerFromSocket = (data: any) => {
     if (isHost || !playerRef.current || !isPlayerReady || isRemoteChange.current) return;
+
+    // A. Troca de Vídeo forçada pelo Socket
+    let currentVideoId = null;
+    try {
+      currentVideoId = playerRef.current.getVideoData().video_id;
+    } catch(e) {}
+    
+    if (data.video_id && data.video_id !== currentVideoId) {
+      isRemoteChange.current = true;
+      playerRef.current.loadVideoById(data.video_id, data.current_video_time || 0);
+      setRoomState((prev: any) => ({ ...prev, video_id: data.video_id }));
+      setTimeout(() => { isRemoteChange.current = false; }, 1000);
+      return;
+    }
 
     const player = playerRef.current;
     const playerState = player.getPlayerState();
     
     setHostPaused(!data.is_playing);
+    hostPausedRef.current = !data.is_playing; // Sincroniza a Ref também
 
     // REGRA PARA O PAUSE (Vindo do Host)
     if (data.is_playing === false) {
