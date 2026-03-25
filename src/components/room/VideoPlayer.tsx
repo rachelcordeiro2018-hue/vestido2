@@ -219,9 +219,9 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       return;
     }
 
-    // B. Corrige Latência do Socket
-    const latency = (Date.now() - (data.sentAt || Date.now())) / 1000;
-    const targetTime = data.is_playing ? data.current_video_time + Math.max(0, latency) : data.current_video_time;
+    // B. O tempo alvo (Sem usar Date.now() do host vs visitante, pois relógios descalibrados causam loop de pausas)
+    // Assumimos que a mensagem socket chega quase instantaneamente (diferença de 100-200ms)
+    const targetTime = data.current_video_time;
 
     // C. Pausa / Play
     const playerState = playerRef.current.getPlayerState();
@@ -238,11 +238,12 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     }
 
     // D. Corrige Posição (Drift)
-    // Se o visitante estiver dessincronizado mais que 2 segundos, puxa o tempo correto.
+    // Se o visitante estiver dessincronizado mais de 3 segundos, puxa o tempo correto.
     const currentTime = playerRef.current.getCurrentTime();
     const diff = Math.abs(currentTime - targetTime);
 
-    if (playerState !== window.YT.PlayerState.BUFFERING && diff > 2.0) {
+    // Evita dar "seek" se o YouTube já estiver carregando o vídeo (Buffering)
+    if (playerState !== window.YT.PlayerState.BUFFERING && diff > 3.0) {
       isRemoteChange.current = true;
       playerRef.current.seekTo(targetTime, true);
       setTimeout(() => { isRemoteChange.current = false; }, 1000);
