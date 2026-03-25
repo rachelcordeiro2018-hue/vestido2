@@ -19,15 +19,16 @@ declare global {
 export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
+  const channelRef = useRef<any>(null);
+
   const [isApiReady, setIsApiReady] = useState(false);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
-  const lastSyncRef = useRef<number>(0);
-  const receivedAtRef = useRef<number>(Date.now()); // Local time when the last update was received
+  
   const isRemoteChange = useRef<boolean>(false);
   const [roomState, setRoomState] = useState<any>(roomData || null);
   const [needsInteraction, setNeedsInteraction] = useState(!isHost);
 
-  // 1. YouTube Iframe API Loader
+  // 1. Carrega API do YouTube
   useEffect(() => {
     if (window.YT && window.YT.Player) {
       setIsApiReady(true);
@@ -44,48 +45,53 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     };
   }, []);
 
-  // 2. Initial State & Subscription
+  // 2. Busca inicial do banco
   useEffect(() => {
     if (!roomId) return;
 
     if (roomData && !roomState) {
       setRoomState(roomData);
-      receivedAtRef.current = Date.now();
     }
 
     const fetchInitial = async () => {
       const { data } = await supabase
         .from('rooms')
-        .select('video_id, current_video_time, is_playing, updated_at')
+        .select('video_id, current_video_time, is_playing')
         .eq('id', roomId)
         .single();
       
       if (data) {
         setRoomState((prev: any) => ({ ...prev, ...data }));
-        receivedAtRef.current = Date.now();
       }
     };
 
     fetchInitial();
-
-    const channel = supabase.channel(`room_sync:${roomId}`)
-      .on('postgres_changes', { 
-        event: 'UPDATE', 
-        schema: 'public', 
-        table: 'rooms', 
-        filter: `id=eq.${roomId}` 
-      }, (payload) => {
-        // Evitar loop infinito: não atualizar se a mudança veio de nós mesmos 
-        // mas aqui estamos apenas recebendo, o 'setRoomState' vai triggar o sync
-        setRoomState(payload.new);
-        receivedAtRef.current = Date.now();
-      })
-      .subscribe();
-
-    return () => { channel.unsubscribe(); };
   }, [roomId]);
 
-  // 3. Player Initialization
+  // 3. Socket / Supabase Broadcast
+  useEffect(() => {
+    if (!roomId) return;
+
+    // Conecta via Sockets do Supabase (Broadcast sem pesar o banco)
+    const channel = supabase.channel(`room_sync_${roomId}`);
+    channelRef.current = channel;
+
+    if (!isHost) {
+      // Visitante ESCUTA o Host
+      channel.on('broadcast', { event: 'player_sync' }, (payload) => {
+        const data = payload.payload;
+        syncPlayerFromSocket(data);
+      });
+    }
+
+    channel.subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
+  }, [roomId, isHost, isPlayerReady]);
+
+  // 4. Inicializa o Player
   useEffect(() => {
     if (!isApiReady || !roomState?.video_id || playerRef.current) return;
 
@@ -106,21 +112,27 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
         },
         events: {
           onReady: () => {
-            console.log('YouTube Player Ready');
+            console.log('YouTube Player Ready - via Socket');
             setIsPlayerReady(true);
-            syncPlayerWithState(roomState, true);
+            
+            // Se for visitante, busca um primeiro update de alinhamento com o initial state
+            if (!isHost && roomState) {
+               syncPlayerFromSocket({
+                 video_id: roomState.video_id,
+                 current_video_time: roomState.current_video_time,
+                 is_playing: roomState.is_playing,
+                 sentAt: Date.now()
+               });
+            }
           },
           onStateChange: (event: any) => {
-            if (!isHost) return;
-            if (isRemoteChange.current) return;
-
-            // 1 = PLAYING, 2 = PAUSED
+            if (!isHost || isRemoteChange.current) return;
+            // Se o host pausou/deu play manualmente, avisa o socket instantaneamente
             const isPlaying = event.data === window.YT.PlayerState.PLAYING;
             const isPaused = event.data === window.YT.PlayerState.PAUSED;
             
             if (isPlaying || isPaused) {
-              const currentTime = playerRef.current.getCurrentTime();
-              updateDbState(isPlaying, currentTime);
+              broadcastState(isPlaying);
             }
           },
           onError: (e: any) => {
@@ -140,106 +152,110 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     };
   }, [isApiReady, roomState?.video_id]);
 
-  // 4. Sync Mechanism
-  const syncPlayerWithState = (state: any, forceSeek = false) => {
-    if (!playerRef.current || !isPlayerReady) return;
+  // 5. Host emite via Socket
+  const broadcastState = (playingOverride?: boolean) => {
+    if (!isHost || !playerRef.current || !channelRef.current || !isPlayerReady) return;
+    
+    // Pega estado atual
+    const pState = playerRef.current.getPlayerState();
+    const isPlaying = playingOverride !== undefined 
+      ? playingOverride 
+      : (pState === window.YT.PlayerState.PLAYING || pState === window.YT.PlayerState.BUFFERING);
+    
+    const currentTime = playerRef.current.getCurrentTime() || 0;
+    const currentVideoId = playerRef.current.getVideoData ? playerRef.current.getVideoData().video_id : roomState?.video_id;
 
-    // A. Video ID Check
+    // Dispara msg no websocket!
+    channelRef.current.send({
+      type: 'broadcast',
+      event: 'player_sync',
+      payload: {
+        video_id: currentVideoId,
+        current_video_time: currentTime,
+        is_playing: isPlaying,
+        sentAt: Date.now()
+      }
+    });
+  };
+
+  // Host: loop enviando posição atualizando o socket (A cada ~1.5s) para sync granular
+  useEffect(() => {
+    if (!isHost) return;
+    const intervalId = setInterval(() => {
+        broadcastState();
+    }, 1500);
+    return () => clearInterval(intervalId);
+  }, [isHost, isPlayerReady]);
+
+  // Host: atualiza no banco só de vez em quando (ex: 10s) para novos entrantes
+  useEffect(() => {
+    if (!isHost) return;
+    const dbIntervalId = setInterval(() => {
+      if (!playerRef.current || !isPlayerReady) return;
+      const pState = playerRef.current.getPlayerState();
+      const isPlaying = pState === window.YT.PlayerState.PLAYING;
+      const t = playerRef.current.getCurrentTime();
+      
+      supabase.from('rooms').update({
+        is_playing: isPlaying,
+        current_video_time: t
+      }).eq('id', roomId);
+      
+    }, 10000);
+    return () => clearInterval(dbIntervalId);
+  }, [isHost, isPlayerReady, roomId]);
+
+  // 6. Visitante reage ao Socket
+  const syncPlayerFromSocket = (data: any) => {
+    if (isHost || !playerRef.current || !isPlayerReady) return;
+
+    // A. Trocou de vídeo?
     const currentVideoId = playerRef.current.getVideoData ? playerRef.current.getVideoData().video_id : null;
-    if (state.video_id && state.video_id !== currentVideoId) {
+    if (data.video_id && data.video_id !== currentVideoId) {
       isRemoteChange.current = true;
-      playerRef.current.loadVideoById(state.video_id, state.current_video_time || 0);
+      playerRef.current.loadVideoById(data.video_id, data.current_video_time || 0);
+      setRoomState((prev: any) => ({ ...prev, video_id: data.video_id }));
       setTimeout(() => { isRemoteChange.current = false; }, 1000);
       return;
     }
 
-    // B. Calculate Latency Correction (Relative to arrival)
-    const now = Date.now();
-    const timeSinceArrival = (now - receivedAtRef.current) / 1000;
-    
-    // O tempo alvo no player é o tempo do banco + o que passou desde que recebemos o dado
-    const targetTime = state.is_playing 
-      ? state.current_video_time + Math.max(0, timeSinceArrival) 
-      : state.current_video_time;
+    // B. Corrige Latência do Socket
+    const latency = (Date.now() - (data.sentAt || Date.now())) / 1000;
+    const targetTime = data.is_playing ? data.current_video_time + Math.max(0, latency) : data.current_video_time;
 
-    // C. Sync Play/Pause
+    // C. Pausa / Play
     const playerState = playerRef.current.getPlayerState();
     const isLikelyPlaying = playerState === window.YT.PlayerState.PLAYING || playerState === window.YT.PlayerState.BUFFERING;
 
-    if (state.is_playing && !isLikelyPlaying) {
+    if (data.is_playing && !isLikelyPlaying) {
       isRemoteChange.current = true;
       playerRef.current.playVideo();
       setTimeout(() => { isRemoteChange.current = false; }, 500);
-    } else if (!state.is_playing && playerState !== window.YT.PlayerState.PAUSED) {
+    } else if (!data.is_playing && playerState !== window.YT.PlayerState.PAUSED) {
       isRemoteChange.current = true;
       playerRef.current.pauseVideo();
       setTimeout(() => { isRemoteChange.current = false; }, 500);
     }
 
-    // D. Drift Correction (seekTo)
+    // D. Corrige Posição (Drift)
+    // Se o visitante estiver dessincronizado mais que 2 segundos, puxa o tempo correto.
     const currentTime = playerRef.current.getCurrentTime();
     const diff = Math.abs(currentTime - targetTime);
-    
-    // Evitar seek se estiver carregando ou se a diferença for pequena
-    // Aumentamos o limiar para 3 segundos para evitar "pulos" constantes por drift de relógio
-    if (playerState !== window.YT.PlayerState.BUFFERING && (forceSeek || diff > 3.0)) {
+
+    if (playerState !== window.YT.PlayerState.BUFFERING && diff > 2.0) {
       isRemoteChange.current = true;
       playerRef.current.seekTo(targetTime, true);
       setTimeout(() => { isRemoteChange.current = false; }, 1000);
     }
   };
 
+  // Visitante interage a primeira vez para liberar som/video bloqueado pelo navegador
   const handleGuestInteraction = () => {
     setNeedsInteraction(false);
     if (playerRef.current && isPlayerReady) {
       playerRef.current.playVideo();
-      // Force sync immediately after first interaction
-      if (roomState) syncPlayerWithState(roomState, true);
     }
   };
-
-  // Trigger sync on roomState update from Supabase
-  useEffect(() => {
-    if (roomState && isPlayerReady && !isHost) {
-      syncPlayerWithState(roomState);
-    }
-  }, [roomState, isPlayerReady, isHost]);
-
-  // 5. Host DB Update
-  const updateDbState = async (isPlaying: boolean, currentTime: number) => {
-    if (!isHost) return;
-    
-    const now = Date.now();
-    // Cooldown de 500ms para evitar spam
-    if (now - lastSyncRef.current < 500) return; 
-
-    lastSyncRef.current = now;
-
-    await supabase.from('rooms').update({
-      is_playing: isPlaying,
-      current_video_time: currentTime,
-      updated_at: new Date().toISOString()
-    }).eq('id', roomId);
-  };
-
-  // 6. Periodic Drift Correction (Every 3 seconds)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (!isPlayerReady || !playerRef.current) return;
-
-      if (isHost) {
-        const pState = playerRef.current.getPlayerState();
-        const isPlaying = pState === window.YT.PlayerState.PLAYING || pState === window.YT.PlayerState.BUFFERING;
-        const currentTime = playerRef.current.getCurrentTime();
-        updateDbState(isPlaying, currentTime);
-      } else if (roomState) {
-        // Clientes corrigem o delay comparando com o banco
-        syncPlayerWithState(roomState);
-      }
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [isHost, isPlayerReady, roomState]);
 
   return (
     <div className="player-wrapper">
@@ -255,16 +271,17 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
                 <path d="M8 5v14l11-7z" />
               </svg>
             </div>
-            <p>Clique para entrar na sessão e sincronizar</p>
+            <p>Clique para entrar na sessão e sincronizar (Sockets)</p>
           </div>
         </div>
       )}
 
       {!isHost && !needsInteraction && (
         <div className="guest-overlay">
-          <div className="guest-badge">Sincronizado com o Host</div>
+          <div className="guest-badge">Sincronizado via Sockets Realtime ⚡</div>
         </div>
       )}
     </div>
   );
 }
+
