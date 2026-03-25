@@ -23,6 +23,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
 
   const [isApiReady, setIsApiReady] = useState(false);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
+  const [hostPaused, setHostPaused] = useState(false); 
   
   const isRemoteChange = useRef<boolean>(false);
   const [roomState, setRoomState] = useState<any>(roomData || null);
@@ -34,24 +35,16 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       setIsApiReady(true);
       return;
     }
-
     const tag = document.createElement('script');
     tag.src = "https://www.youtube.com/iframe_api";
     const firstScriptTag = document.getElementsByTagName('script')[0];
     firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
-
-    window.onYouTubeIframeAPIReady = () => {
-      setIsApiReady(true);
-    };
+    window.onYouTubeIframeAPIReady = () => setIsApiReady(true);
   }, []);
 
-  // 2. Busca inicial do banco
+  // 2. Busca inicial do banco e atualização por Props
   useEffect(() => {
     if (!roomId) return;
-
-    if (roomData && !roomState) {
-      setRoomState(roomData);
-    }
 
     const fetchInitial = async () => {
       const { data } = await supabase
@@ -65,200 +58,165 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       }
     };
 
-    fetchInitial();
+    if (!roomState) {
+      fetchInitial();
+    }
   }, [roomId]);
 
-  // 3. Socket / Supabase Broadcast
+  // Se o componente Pai (Room) mandar um video_id novo, atuamos nele:
+  useEffect(() => {
+    if (roomData && roomState && roomData.video_id !== roomState.video_id) {
+      setRoomState((prev: any) => ({ ...prev, video_id: roomData.video_id, current_video_time: roomData.current_video_time || 0 }));
+      if (playerRef.current && isPlayerReady) {
+        playerRef.current.loadVideoById(roomData.video_id, roomData.current_video_time || 0);
+        if (roomData.is_playing) playerRef.current.playVideo();
+      }
+    }
+  }, [roomData?.video_id]);
+
+  // 3. Canal Realtime (Supabase)
   useEffect(() => {
     if (!roomId) return;
-
-    // Conecta via Sockets do Supabase (Broadcast sem pesar o banco)
-    const channel = supabase.channel(`room_sync_${roomId}`);
+    const channel = supabase.channel(`room_sync_${roomId}`, {
+      config: { broadcast: { ack: false, self: false } }
+    });
     channelRef.current = channel;
 
     if (!isHost) {
-      // Visitante ESCUTA o Host
-      channel.on('broadcast', { event: 'player_sync' }, (payload) => {
-        const data = payload.payload;
-        syncPlayerFromSocket(data);
+      channel.on('broadcast', { event: 'player_sync' }, ({ payload }) => {
+        syncPlayerFromSocket(payload);
       });
     }
 
     channel.subscribe();
-
-    return () => {
-      channel.unsubscribe();
-    };
+    return () => { channel.unsubscribe(); };
   }, [roomId, isHost, isPlayerReady]);
 
-  // 4. Inicializa o Player
+  // 3. Inicializa o Player
   useEffect(() => {
     if (!isApiReady || !roomState?.video_id || playerRef.current) return;
 
-    const initPlayer = () => {
-      if (!containerRef.current) return;
-      
-      playerRef.current = new window.YT.Player(containerRef.current, {
-        videoId: roomState.video_id,
-        width: '100%',
-        height: '100%',
-        playerVars: {
-          autoplay: roomState.is_playing ? 1 : 0,
-          controls: 1, 
-          disablekb: isHost ? 0 : 1,
-          rel: 0,
-          modestbranding: 1,
-          enablejsapi: 1
+    playerRef.current = new window.YT.Player(containerRef.current, {
+      videoId: roomState.video_id,
+      width: '100%',
+      height: '100%',
+      playerVars: {
+        autoplay: roomState.is_playing ? 1 : 0,
+        controls: 1, // Habilitado para todos poderem mexer no VOLUME
+        disablekb: isHost ? 0 : 1, // Desabilita teclado para visitantes (espaço não pausa)
+        rel: 0,
+        modestbranding: 1,
+        enablejsapi: 1
+      },
+      events: {
+        onReady: () => {
+          setIsPlayerReady(true);
+          if (!isHost && roomState) {
+             syncPlayerFromSocket({ ...roomState, sentAt: Date.now() });
+          }
         },
-        events: {
-          onReady: () => {
-            console.log('YouTube Player Ready - via Socket');
-            setIsPlayerReady(true);
-            
-            // Se for visitante, busca um primeiro update de alinhamento com o initial state
-            if (!isHost && roomState) {
-               syncPlayerFromSocket({
-                 video_id: roomState.video_id,
-                 current_video_time: roomState.current_video_time,
-                 is_playing: roomState.is_playing
-               });
-            }
-          },
-          onStateChange: (event: any) => {
-            if (!isHost || isRemoteChange.current) return;
-            // Identifica se o host parou, rodou ou travou carregando (Buffering)
-            const isPlaying = event.data === window.YT.PlayerState.PLAYING;
-            const isPaused = event.data === window.YT.PlayerState.PAUSED;
-            const isBuffering = event.data === window.YT.PlayerState.BUFFERING;
-            
-            if (isPlaying) {
+        onStateChange: (event: any) => {
+          // LÓGICA PARA O HOST
+          if (isHost && !isRemoteChange.current) {
+            if (event.data === window.YT.PlayerState.PLAYING) {
               broadcastState(true);
-            } else if (isPaused || isBuffering) {
-              // Quando o host "pausa" ou entra em "carregamento infinito", enviamos FALSE
-              // para forçar que o visitante pare também, sem ficar pulando ou buscando tempo!
-              broadcastState(false); 
+            } else if (event.data === window.YT.PlayerState.PAUSED) {
+              broadcastState(false);
             }
-          },
-          onError: (e: any) => {
-            console.error('YouTube Player Error:', e.data);
+            return;
+          }
+
+          // LÓGICA PARA O VISITANTE (BLOQUEIO DE PAUSA MANUAL)
+          if (!isHost && !isRemoteChange.current) {
+            // Se o visitante pausar mas o Host estiver em modo PLAY (hostPaused = false)
+            if (event.data === window.YT.PlayerState.PAUSED && !hostPaused) {
+              playerRef.current.playVideo(); // Força o play novamente
+            }
           }
         }
-      });
-    };
-
-    initPlayer();
+      }
+    });
 
     return () => {
-      if (playerRef.current && playerRef.current.destroy) {
-        playerRef.current.destroy();
-        playerRef.current = null;
-      }
+      if (playerRef.current?.destroy) playerRef.current.destroy();
     };
-  }, [isApiReady, roomState?.video_id]);
+  }, [isApiReady, roomState?.video_id, hostPaused]); // Dependência hostPaused importante aqui
 
-  // 5. Host emite via Socket
+  // 4. Função de Broadcast (Host -> Visitantes)
   const broadcastState = (playingOverride?: boolean) => {
     if (!isHost || !playerRef.current || !channelRef.current || !isPlayerReady) return;
     
-    // Pega estado atual
     const pState = playerRef.current.getPlayerState();
     const isPlaying = playingOverride !== undefined 
       ? playingOverride 
       : (pState === window.YT.PlayerState.PLAYING);
     
-    const currentTime = playerRef.current.getCurrentTime() || 0;
-    const currentVideoId = playerRef.current.getVideoData ? playerRef.current.getVideoData().video_id : roomState?.video_id;
-
-    // Dispara msg no websocket!
     channelRef.current.send({
       type: 'broadcast',
       event: 'player_sync',
       payload: {
-        video_id: currentVideoId,
-        current_video_time: currentTime,
-        is_playing: isPlaying
+        video_id: playerRef.current.getVideoData().video_id,
+        current_video_time: playerRef.current.getCurrentTime(),
+        is_playing: isPlaying,
+        sentAt: Date.now()
       }
     });
   };
 
-  // Host: loop enviando posição atualizando o socket (A cada ~1.5s) para sync granular
+  // Loop de Sync Granular (Host)
   useEffect(() => {
-    if (!isHost) return;
-    const intervalId = setInterval(() => {
-        broadcastState();
-    }, 1500);
-    return () => clearInterval(intervalId);
+    if (!isHost || !isPlayerReady) return;
+    const interval = setInterval(() => {
+      const pState = playerRef.current?.getPlayerState();
+      if (pState === window.YT.PlayerState.PLAYING) {
+        broadcastState(true);
+      }
+    }, 2000);
+    return () => clearInterval(interval);
   }, [isHost, isPlayerReady]);
 
-  // Host: atualiza no banco só de vez em quando (ex: 10s) para novos entrantes
-  useEffect(() => {
-    if (!isHost) return;
-    const dbIntervalId = setInterval(() => {
-      if (!playerRef.current || !isPlayerReady) return;
-      const pState = playerRef.current.getPlayerState();
-      const isPlaying = pState === window.YT.PlayerState.PLAYING;
-      const t = playerRef.current.getCurrentTime();
-      
-      supabase.from('rooms').update({
-        is_playing: isPlaying,
-        current_video_time: t
-      }).eq('id', roomId);
-      
-    }, 10000);
-    return () => clearInterval(dbIntervalId);
-  }, [isHost, isPlayerReady, roomId]);
-
-  // 6. Visitante reage ao Socket
+  // 5. Lógica de Sincronização (Visitante)
   const syncPlayerFromSocket = (data: any) => {
-    if (isHost || !playerRef.current || !isPlayerReady) return;
+    if (isHost || !playerRef.current || !isPlayerReady || isRemoteChange.current) return;
 
-    // A. Trocou de vídeo?
-    const currentVideoId = playerRef.current.getVideoData ? playerRef.current.getVideoData().video_id : null;
-    if (data.video_id && data.video_id !== currentVideoId) {
-      isRemoteChange.current = true;
-      playerRef.current.loadVideoById(data.video_id, data.current_video_time || 0);
-      setRoomState((prev: any) => ({ ...prev, video_id: data.video_id }));
-      setTimeout(() => { isRemoteChange.current = false; }, 1000);
-      return;
+    const player = playerRef.current;
+    const playerState = player.getPlayerState();
+    
+    setHostPaused(!data.is_playing);
+
+    // REGRA PARA O PAUSE (Vindo do Host)
+    if (data.is_playing === false) {
+      if (playerState !== window.YT.PlayerState.PAUSED) {
+        isRemoteChange.current = true;
+        player.pauseVideo();
+        setTimeout(() => { isRemoteChange.current = false; }, 800);
+      }
+      return; 
     }
 
-    // B. Tempo alvo sem atrasos baseados em latência falha de Data
-    const targetTime = data.current_video_time;
-
-    // C. Pausa / Play
-    const playerState = playerRef.current.getPlayerState();
-    const isLikelyPlaying = playerState === window.YT.PlayerState.PLAYING || playerState === window.YT.PlayerState.BUFFERING;
-
-    if (data.is_playing && !isLikelyPlaying) {
+    // REGRA PARA O PLAY (Vindo do Host)
+    if (data.is_playing && (playerState === window.YT.PlayerState.PAUSED || playerState === window.YT.PlayerState.CUED)) {
       isRemoteChange.current = true;
-      playerRef.current.playVideo();
-      setTimeout(() => { isRemoteChange.current = false; }, 500);
-    } else if (!data.is_playing && playerState !== window.YT.PlayerState.PAUSED) {
-      isRemoteChange.current = true;
-      playerRef.current.pauseVideo();
-      setTimeout(() => { isRemoteChange.current = false; }, 500);
+      player.playVideo();
+      setTimeout(() => { isRemoteChange.current = false; }, 800);
     }
 
-    // D. Corrige Posição (Drift)
-    // Usamos 4.0 segundos de tolerância para não causar saltos bruscos se as maquinas demorarem processar.
-    const currentTime = playerRef.current.getCurrentTime();
-    const diff = Math.abs(currentTime - targetTime);
+    // Ajuste de Drift (Tempo)
+    const latency = (Date.now() - data.sentAt) / 1000;
+    const adjustedTime = data.current_video_time + (latency > 0 && latency < 4 ? latency : 0);
+    const currentTime = player.getCurrentTime();
+    const diff = Math.abs(currentTime - adjustedTime);
 
-    // Evita dar "seek" se o YouTube já estiver carregando o vídeo (Buffering)
-    if (playerState !== window.YT.PlayerState.BUFFERING && diff > 4.0) {
+    if (diff > 3.0 && playerState !== window.YT.PlayerState.BUFFERING) {
       isRemoteChange.current = true;
-      // Adiciona 0.5s para compensar o tempo do vídeo ir até o jogador e ele carregar.
-      playerRef.current.seekTo(targetTime + 0.5, true);
+      player.seekTo(adjustedTime, true);
       setTimeout(() => { isRemoteChange.current = false; }, 1000);
     }
   };
 
-  // Visitante interage a primeira vez para liberar som/video bloqueado pelo navegador
   const handleGuestInteraction = () => {
     setNeedsInteraction(false);
-    if (playerRef.current && isPlayerReady) {
-      playerRef.current.playVideo();
-    }
+    if (playerRef.current) playerRef.current.playVideo();
   };
 
   return (
@@ -266,7 +224,16 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       <div className="yt-iframe-container">
         <div ref={containerRef}></div>
       </div>
-      
+
+      {!isHost && !needsInteraction && hostPaused && (
+        <div className="host-status-overlay">
+          <div className="status-badge pause-alert">
+            <span className="icon">II</span>
+            Host pausou o vídeo
+          </div>
+        </div>
+      )}
+
       {!isHost && needsInteraction && (
         <div className="guest-join-overlay" onClick={handleGuestInteraction}>
           <div className="join-content">
@@ -275,17 +242,10 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
                 <path d="M8 5v14l11-7z" />
               </svg>
             </div>
-            <p>Clique para entrar na sessão e sincronizar (Sockets)</p>
+            <p>Clique para sincronizar com a sala</p>
           </div>
-        </div>
-      )}
-
-      {!isHost && !needsInteraction && (
-        <div className="guest-overlay">
-          <div className="guest-badge">Sincronizado via Sockets Realtime ⚡</div>
         </div>
       )}
     </div>
   );
 }
-

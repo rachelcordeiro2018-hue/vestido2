@@ -51,11 +51,24 @@ export function VideoQueue({ roomId, isHost }: { roomId: string, isHost: boolean
     await supabase.from('room_queue').delete().eq('id', id);
   };
 
+  const getYoutubeId = (url: string) => {
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+    const match = url?.match(regExp);
+    return (match && match[2].length === 11) ? match[2] : null;
+  };
+
   const forcePlay = async (item: QueueItem) => {
     if (!isHost) return;
     
+    const vId = getYoutubeId(item.video_url);
+
     // Play immediately sets it as current video in rooms, and marks played
-    await supabase.from('rooms').update({ video_url: item.video_url }).eq('id', roomId);
+    await supabase.from('rooms').update({ 
+      video_url: item.video_url,
+      video_id: vId,
+      current_video_time: 0,
+      is_playing: true
+    }).eq('id', roomId);
     await supabase.from('room_queue').update({ played: true }).eq('id', item.id);
   };
 
