@@ -30,6 +30,21 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   const [roomState, setRoomState] = useState<any>(roomData || null);
   const [needsInteraction, setNeedsInteraction] = useState(!isHost);
 
+  // Funções de clique extraídas para evitar erro de build
+  const handleAbsentClick = () => {
+    setHostAbsent(false);
+    if (playerRef.current && playerRef.current.playVideo) {
+      playerRef.current.playVideo();
+    }
+  };
+
+  const handleJoinClick = () => {
+    setNeedsInteraction(false);
+    if (playerRef.current && playerRef.current.playVideo) {
+      playerRef.current.playVideo();
+    }
+  };
+
   useEffect(() => {
     const handleVisibility = () => { 
       isTabHidden.current = document.hidden;
@@ -133,3 +148,71 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
         
         const myState = playerRef.current.getPlayerState();
         if (payload.is_playing && myState !== 1 && myState !== 3) {
+          playerRef.current.playVideo();
+        } else if (!payload.is_playing && myState === 1 && !hostAbsent) {
+          playerRef.current.pauseVideo();
+        }
+
+        const targetTime = payload.current_video_time + ((Date.now() - payload.sentAt) / 1000);
+        if (Math.abs(playerRef.current.getCurrentTime() - targetTime) > 5 && myState !== 3) {
+          isRemoteChange.current = true;
+          playerRef.current.seekTo(targetTime, true);
+          setTimeout(() => { isRemoteChange.current = false; }, 1500);
+        }
+      });
+    }
+    
+    ch.subscribe();
+    return () => { ch.unsubscribe(); };
+  }, [roomId, isHost, isPlayerReady, hostAbsent]);
+
+  useEffect(() => {
+    if (!isApiReady || !roomState?.video_id || playerRef.current) return;
+    playerRef.current = new window.YT.Player(containerRef.current, {
+      videoId: roomState.video_id,
+      width: '100%',
+      height: '100%',
+      playerVars: { autoplay: 1, controls: 1, enablejsapi: 1, playsinline: 1 },
+      events: {
+        onReady: () => setIsPlayerReady(true),
+        onStateChange: (e: any) => {
+          if (isHost && !isRemoteChange.current) {
+            if (e.data === 1) broadcast(true);
+            if (e.data === 2 && !isTabHidden.current) broadcast(false);
+            if (e.data === 0 && onEnded) onEnded();
+          }
+          if (!isHost && !isRemoteChange.current && e.data === 2 && !hostPausedRef.current && !hostAbsent) {
+            playerRef.current.playVideo();
+          }
+        }
+      }
+    });
+    return () => {
+      if (playerRef.current && playerRef.current.destroy) {
+        playerRef.current.destroy();
+      }
+      playerRef.current = null;
+    };
+  }, [isApiReady, roomState?.video_id, hostAbsent]);
+
+  return (
+    <div className="player-wrapper">
+      <div className="yt-iframe-container">
+        <div ref={containerRef}></div>
+      </div>
+      
+      {(!isHost && hostAbsent) && (
+        <div className="host-absent-overlay" onClick={handleAbsentClick}>
+          <div className="absent-content">
+            <p>O Host ficou ausente.</p>
+            <button className="absent-play-button">Dar play para continuar vendo</button>
+          </div>
+        </div>
+      )}
+
+      {(!isHost && needsInteraction) && (
+        <div className="guest-join-overlay" onClick={handleJoinClick}>
+          <div className="join-content">
+            <div className="pulse-button">
+              <svg viewBox="0 0 24 24" fill="currentColor" width="40" height="40">
+                <path
