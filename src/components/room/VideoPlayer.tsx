@@ -23,20 +23,24 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   const isRemoteChange = useRef(false);
   const hostPausedRef = useRef(false);
   const isTabHidden = useRef(false);
-  const lastSentVideoId = useRef<string>("");
 
   const [isApiReady, setIsApiReady] = useState(false);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [hostPaused, setHostPaused] = useState(false);
+  const [hostAbsent, setHostAbsent] = useState(false); // Novo estado de ausência
   const [roomState, setRoomState] = useState<any>(roomData || null);
   const [needsInteraction, setNeedsInteraction] = useState(!isHost);
 
   useEffect(() => {
     const handleVisibility = () => { 
       isTabHidden.current = document.hidden;
-      // No Mobile, se o host ocultar a aba, garantimos que hostPausedRef reflita que NÃO foi um pause manual
-      if (document.hidden) {
-        hostPausedRef.current = false; 
+      if (isHost && channelRef.current) {
+        // Host avisa quando sai ou volta da aba
+        channelRef.current.send({
+          type: 'broadcast',
+          event: 'host_status',
+          payload: { absent: document.hidden }
+        });
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -50,29 +54,25 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       window.onYouTubeIframeAPIReady = () => setIsApiReady(true);
     }
     return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, []);
+  }, [isHost]);
 
   useEffect(() => {
     if (!roomId) return;
     const fetchInit = async () => {
       const { data } = await supabase.from('rooms').select('*').eq('id', roomId).single();
-      if (data) {
-        setRoomState(data);
-        lastSentVideoId.current = data.video_id;
-      }
+      if (data) setRoomState(data);
     };
     fetchInit();
   }, [roomId]);
 
+  // Sincronia de Fila
   useEffect(() => {
     if (roomData?.video_id && isPlayerReady && playerRef.current) {
       let curr = "";
       try { curr = playerRef.current.getVideoData().video_id; } catch(e){}
       if (roomData.video_id !== curr) {
         isRemoteChange.current = true;
-        lastSentVideoId.current = roomData.video_id;
         playerRef.current.loadVideoById(roomData.video_id, 0);
-        setRoomState((prev: any) => ({ ...prev, video_id: roomData.video_id }));
         setTimeout(() => { isRemoteChange.current = false; }, 2500);
       }
     }
@@ -80,21 +80,14 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
 
   const broadcast = (playing: boolean) => {
     if (!isHost || !playerRef.current || !channelRef.current || isRemoteChange.current) return;
-    
-    // REGRA DE OURO PARA CELULAR: 
-    // Se a aba estiver oculta (minimizado) e o evento for PAUSE, não enviamos o broadcast.
-    // Isso evita que o "auto-pause" do Android/iOS pare o vídeo para os visitantes.
+    // Não envia pausa se a aba estiver escondida (Mobile Background)
     if (isTabHidden.current && !playing) return;
-
-    let currentVid = "";
-    try { currentVid = playerRef.current.getVideoData().video_id; } catch(e){}
-    if (currentVid !== roomData?.video_id && currentVid !== roomState?.video_id) return;
 
     channelRef.current.send({
       type: 'broadcast',
       event: 'player_sync',
       payload: {
-        video_id: currentVid,
+        video_id: roomData?.video_id || roomState?.video_id,
         current_video_time: playerRef.current.getCurrentTime(),
         is_playing: playing,
         sentAt: Date.now()
@@ -102,30 +95,34 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     });
   };
 
+  // Loop de Sync
   useEffect(() => {
     if (!isHost || !isPlayerReady) return;
     const i = setInterval(() => {
-      // O Loop de sync continua enviando "PLAY" mesmo se o host estiver em background,
-      // contanto que o último estado conhecido do player tenha sido PLAYING.
-      if (!isRemoteChange.current && !isTabHidden.current) {
-        if (playerRef.current?.getPlayerState() === 1) broadcast(true);
+      if (!isTabHidden.current && playerRef.current?.getPlayerState() === 1) {
+        broadcast(true);
       }
     }, 3000); 
     return () => clearInterval(i);
   }, [isHost, isPlayerReady, roomData?.video_id]);
 
+  // Canal Realtime
   useEffect(() => {
     if (!roomId) return;
     const ch = supabase.channel(`room_sync_${roomId}`);
     channelRef.current = ch;
     
     if (!isHost) {
+      // Escuta status do Host (Ausente/Presente)
+      ch.on('broadcast', { event: 'host_status' }, ({ payload }) => {
+        setHostAbsent(payload.absent);
+      });
+
       ch.on('broadcast', { event: 'player_sync' }, ({ payload }) => {
         if (isRemoteChange.current || !playerRef.current?.getCurrentTime) return;
-
+        
         let cid = "";
         try { cid = playerRef.current.getVideoData().video_id; } catch(e){}
-        
         if (payload.video_id !== cid) {
           isRemoteChange.current = true;
           playerRef.current.loadVideoById(payload.video_id, payload.current_video_time);
@@ -139,49 +136,40 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
         const myState = playerRef.current.getPlayerState();
         if (payload.is_playing && myState !== 1 && myState !== 3) {
           playerRef.current.playVideo();
-        } else if (!payload.is_playing && myState === 1) {
+        } else if (!payload.is_playing && myState === 1 && !hostAbsent) {
+          // Só pausa se o host NÃO estiver ausente (se estiver ausente, ignoramos o comando de pause)
           playerRef.current.pauseVideo();
         }
 
         const targetTime = payload.current_video_time + ((Date.now() - payload.sentAt) / 1000);
-        const diff = Math.abs(playerRef.current.getCurrentTime() - targetTime);
-
-        if (diff > 5 && myState !== 3) {
-          isRemoteChange.current = true;
+        if (Math.abs(playerRef.current.getCurrentTime() - targetTime) > 5 && myState !== 3) {
           playerRef.current.seekTo(targetTime, true);
-          setTimeout(() => { isRemoteChange.current = false; }, 1500);
         }
       });
     }
     
     ch.subscribe();
     return () => { ch.unsubscribe(); };
-  }, [roomId, isHost, isPlayerReady]);
+  }, [roomId, isHost, isPlayerReady, hostAbsent]);
 
+  // Inicializa Player
   useEffect(() => {
     if (!isApiReady || !roomState?.video_id || playerRef.current) return;
     playerRef.current = new window.YT.Player(containerRef.current, {
       videoId: roomState.video_id,
       width: '100%',
       height: '100%',
-      playerVars: { 
-        autoplay: 1, 
-        controls: 1, 
-        enablejsapi: 1, 
-        rel: 0, 
-        modestbranding: 1,
-        playsinline: 1 // ESSENCIAL PARA MOBILE: evita que abra o player nativo em tela cheia
-      },
+      playerVars: { autoplay: 1, controls: 1, enablejsapi: 1, playsinline: 1 },
       events: {
         onReady: () => setIsPlayerReady(true),
         onStateChange: (e: any) => {
           if (isHost && !isRemoteChange.current) {
             if (e.data === 1) broadcast(true);
-            // Se o host pausar manualmente, o broadcast vai. Se for o sistema pausando (aba oculta), não vai.
             if (e.data === 2 && !isTabHidden.current) broadcast(false);
             if (e.data === 0 && onEnded) onEnded();
           }
-          if (!isHost && !isRemoteChange.current && e.data === 2 && !hostPausedRef.current) {
+          // Se o visitante pausar e o host estiver presente, força o play
+          if (!isHost && !isRemoteChange.current && e.data === 2 && !hostPausedRef.current && !hostAbsent) {
             playerRef.current.playVideo();
           }
         }
@@ -191,14 +179,26 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       playerRef.current?.destroy?.();
       playerRef.current = null;
     };
-  }, [isApiReady, roomState?.video_id]);
+  }, [isApiReady, roomState?.video_id, hostAbsent]);
 
   return (
     <div className="player-wrapper">
       <div className="yt-iframe-container"><div ref={containerRef}></div></div>
+      
+      {/* Overlay para Sincronia Inicial */}
       {!isHost && needsInteraction && (
         <div className="guest-join-overlay" onClick={() => { setNeedsInteraction(false); playerRef.current?.playVideo(); }}>
-          <div className="join-content"><p>Sincronizar com o Host</p></div>
+          <div className="join-content"><p>Sincronizar com a Sala</p></div>
+        </div>
+      )}
+
+      {/* Overlay de Host Ausente (Mobile fix) */}
+      {!isHost && hostAbsent && (
+        <div className="host-absent-overlay" onClick={() => playerRef.current?.playVideo()}>
+          <div className="absent-content">
+            <p>O Host ficou ausente.</p>
+            <button className="play-button">Clique aqui para continuar assistindo</button>
+          </div>
         </div>
       )}
     </div>
