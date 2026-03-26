@@ -32,16 +32,12 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
 
   const handleAbsentClick = () => {
     setHostAbsent(false);
-    if (playerRef.current && playerRef.current.playVideo) {
-      playerRef.current.playVideo();
-    }
+    if (playerRef.current?.playVideo) playerRef.current.playVideo();
   };
 
   const handleJoinClick = () => {
     setNeedsInteraction(false);
-    if (playerRef.current && playerRef.current.playVideo) {
-      playerRef.current.playVideo();
-    }
+    if (playerRef.current?.playVideo) playerRef.current.playVideo();
   };
 
   useEffect(() => {
@@ -65,9 +61,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       document.body.appendChild(tag);
       window.onYouTubeIframeAPIReady = () => setIsApiReady(true);
     }
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibility);
-    };
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, [isHost]);
 
   useEffect(() => {
@@ -95,7 +89,6 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   const broadcast = (playing: boolean) => {
     if (!isHost || !playerRef.current || !channelRef.current || isRemoteChange.current) return;
     if (isTabHidden.current && !playing) return;
-
     const currentVid = roomData?.video_id || roomState?.video_id;
     if (!currentVid) return;
 
@@ -114,7 +107,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   useEffect(() => {
     if (!isHost || !isPlayerReady) return;
     const intervalId = setInterval(() => {
-      if (!isTabHidden.current && playerRef.current && playerRef.current.getPlayerState() === 1) {
+      if (!isTabHidden.current && playerRef.current?.getPlayerState() === 1) {
         broadcast(true);
       }
     }, 3000); 
@@ -132,8 +125,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       });
 
       ch.on('broadcast', { event: 'player_sync' }, ({ payload }) => {
-        if (isRemoteChange.current || !playerRef.current || !playerRef.current.getCurrentTime) return;
-        
+        if (isRemoteChange.current || !playerRef.current?.getCurrentTime) return;
         let cid = "";
         try { cid = playerRef.current.getVideoData().video_id; } catch(e){}
         if (payload.video_id !== cid) {
@@ -142,16 +134,13 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
           setTimeout(() => { isRemoteChange.current = false; }, 2500);
           return;
         }
-
         hostPausedRef.current = !payload.is_playing;
-        
         const myState = playerRef.current.getPlayerState();
         if (payload.is_playing && myState !== 1 && myState !== 3) {
           playerRef.current.playVideo();
         } else if (!payload.is_playing && myState === 1 && !hostAbsent) {
           playerRef.current.pauseVideo();
         }
-
         const targetTime = payload.current_video_time + ((Date.now() - payload.sentAt) / 1000);
         if (Math.abs(playerRef.current.getCurrentTime() - targetTime) > 5 && myState !== 3) {
           isRemoteChange.current = true;
@@ -160,7 +149,6 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
         }
       });
     }
-    
     ch.subscribe();
     return () => { ch.unsubscribe(); };
   }, [roomId, isHost, isPlayerReady, hostAbsent]);
@@ -187,33 +175,9 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       }
     });
     return () => {
-      if (playerRef.current && playerRef.current.destroy) {
-        playerRef.current.destroy();
-      }
+      if (playerRef.current?.destroy) playerRef.current.destroy();
       playerRef.current = null;
     };
   }, [isApiReady, roomState?.video_id, hostAbsent]);
 
   return (
-    <div className="player-wrapper">
-      <div className="yt-iframe-container">
-        <div ref={containerRef}></div>
-      </div>
-      
-      {!isHost && hostAbsent && (
-        <div className="host-absent-overlay" onClick={handleAbsentClick}>
-          <div className="absent-content">
-            <p>O Host ficou ausente.</p>
-            <button className="absent-play-button" type="button">
-              Dar play para continuar vendo
-            </button>
-          </div>
-        </div>
-      )}
-
-      {!isHost && needsInteraction && (
-        <div className="guest-join-overlay" onClick={handleJoinClick}>
-          <div className="join-content">
-            <div className="pulse-button">
-              <svg viewBox="0 0 24 24" fill="currentColor" width="40" height="40">
-                <path d="M8
