@@ -26,7 +26,6 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
 
   const [isApiReady, setIsApiReady] = useState(false);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
-  const [hostPaused, setHostPaused] = useState(false);
   const [hostAbsent, setHostAbsent] = useState(false); 
   const [roomState, setRoomState] = useState<any>(roomData || null);
   const [needsInteraction, setNeedsInteraction] = useState(!isHost);
@@ -129,7 +128,6 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
           return;
         }
 
-        setHostPaused(!payload.is_playing);
         hostPausedRef.current = !payload.is_playing;
         
         const myState = playerRef.current.getPlayerState();
@@ -155,6 +153,4 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   }, [roomId, isHost, isPlayerReady, hostAbsent]);
 
   useEffect(() => {
-    if (!isApiReady || !roomState?.video_id || playerRef.current) return;
-    playerRef.current = new window.YT.Player(containerRef.current, {
-      videoId: roomState.video_
+    if (!is
