@@ -83,6 +83,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     if (isTabHidden.current && !playing) return;
 
     const currentVid = roomData?.video_id || roomState?.video_id;
+    if (!currentVid) return;
 
     channelRef.current.send({
       type: 'broadcast',
@@ -132,25 +133,3 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
         
         const myState = playerRef.current.getPlayerState();
         if (payload.is_playing && myState !== 1 && myState !== 3) {
-          playerRef.current.playVideo();
-        } else if (!payload.is_playing && myState === 1 && !hostAbsent) {
-          playerRef.current.pauseVideo();
-        }
-
-        const targetTime = payload.current_video_time + ((Date.now() - payload.sentAt) / 1000);
-        if (Math.abs(playerRef.current.getCurrentTime() - targetTime) > 5 && myState !== 3) {
-          isRemoteChange.current = true;
-          playerRef.current.seekTo(targetTime, true);
-          setTimeout(() => { isRemoteChange.current = false; }, 1500);
-        }
-      });
-    }
-    
-    ch.subscribe();
-    return () => { 
-      ch.unsubscribe(); 
-    };
-  }, [roomId, isHost, isPlayerReady, hostAbsent]);
-
-  useEffect(() => {
-    if (!is
