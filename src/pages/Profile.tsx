@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
 import { supabase } from '../lib/supabase';
 import { Camera, Edit2, Grid, Folder, Plus, Trash2, Check, X } from 'lucide-react';
