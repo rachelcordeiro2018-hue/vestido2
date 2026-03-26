@@ -23,7 +23,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   const isRemoteChange = useRef(false);
   const hostPausedRef = useRef(false);
   const isTabHidden = useRef(false);
-  const lastSentVideoId = useRef<string>(""); // Trava para não enviar vídeo antigo
+  const lastSentVideoId = useRef<string>("");
 
   const [isApiReady, setIsApiReady] = useState(false);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
@@ -32,7 +32,13 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   const [needsInteraction, setNeedsInteraction] = useState(!isHost);
 
   useEffect(() => {
-    const handleVisibility = () => { isTabHidden.current = document.hidden; };
+    const handleVisibility = () => { 
+      isTabHidden.current = document.hidden;
+      // No Mobile, se o host ocultar a aba, garantimos que hostPausedRef reflita que NÃO foi um pause manual
+      if (document.hidden) {
+        hostPausedRef.current = false; 
+      }
+    };
     document.addEventListener('visibilitychange', handleVisibility);
     
     if (window.YT && window.YT.Player) {
@@ -58,18 +64,15 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
     fetchInit();
   }, [roomId]);
 
-  // 3. Monitora a troca de vídeo (FILA) - RESET IMEDIATO AQUI
   useEffect(() => {
     if (roomData?.video_id && isPlayerReady && playerRef.current) {
       let curr = "";
       try { curr = playerRef.current.getVideoData().video_id; } catch(e){}
-      
       if (roomData.video_id !== curr) {
         isRemoteChange.current = true;
-        lastSentVideoId.current = roomData.video_id; // Atualiza a trava antes de carregar
+        lastSentVideoId.current = roomData.video_id;
         playerRef.current.loadVideoById(roomData.video_id, 0);
         setRoomState((prev: any) => ({ ...prev, video_id: roomData.video_id }));
-        
         setTimeout(() => { isRemoteChange.current = false; }, 2500);
       }
     }
@@ -78,10 +81,13 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   const broadcast = (playing: boolean) => {
     if (!isHost || !playerRef.current || !channelRef.current || isRemoteChange.current) return;
     
+    // REGRA DE OURO PARA CELULAR: 
+    // Se a aba estiver oculta (minimizado) e o evento for PAUSE, não enviamos o broadcast.
+    // Isso evita que o "auto-pause" do Android/iOS pare o vídeo para os visitantes.
+    if (isTabHidden.current && !playing) return;
+
     let currentVid = "";
     try { currentVid = playerRef.current.getVideoData().video_id; } catch(e){}
-
-    // SEGURANÇA: Só faz broadcast se o vídeo no player for o mesmo da prop/estado atual
     if (currentVid !== roomData?.video_id && currentVid !== roomState?.video_id) return;
 
     channelRef.current.send({
@@ -99,12 +105,14 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   useEffect(() => {
     if (!isHost || !isPlayerReady) return;
     const i = setInterval(() => {
-      if (playerRef.current?.getPlayerState() === 1 && !isRemoteChange.current) {
-        broadcast(true);
+      // O Loop de sync continua enviando "PLAY" mesmo se o host estiver em background,
+      // contanto que o último estado conhecido do player tenha sido PLAYING.
+      if (!isRemoteChange.current && !isTabHidden.current) {
+        if (playerRef.current?.getPlayerState() === 1) broadcast(true);
       }
     }, 3000); 
     return () => clearInterval(i);
-  }, [isHost, isPlayerReady, roomData?.video_id, roomState?.video_id]);
+  }, [isHost, isPlayerReady, roomData?.video_id]);
 
   useEffect(() => {
     if (!roomId) return;
@@ -156,12 +164,20 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       videoId: roomState.video_id,
       width: '100%',
       height: '100%',
-      playerVars: { autoplay: 1, controls: 1, enablejsapi: 1, rel: 0, modestbranding: 1 },
+      playerVars: { 
+        autoplay: 1, 
+        controls: 1, 
+        enablejsapi: 1, 
+        rel: 0, 
+        modestbranding: 1,
+        playsinline: 1 // ESSENCIAL PARA MOBILE: evita que abra o player nativo em tela cheia
+      },
       events: {
         onReady: () => setIsPlayerReady(true),
         onStateChange: (e: any) => {
           if (isHost && !isRemoteChange.current) {
             if (e.data === 1) broadcast(true);
+            // Se o host pausar manualmente, o broadcast vai. Se for o sistema pausando (aba oculta), não vai.
             if (e.data === 2 && !isTabHidden.current) broadcast(false);
             if (e.data === 0 && onEnded) onEnded();
           }
@@ -182,7 +198,7 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
       <div className="yt-iframe-container"><div ref={containerRef}></div></div>
       {!isHost && needsInteraction && (
         <div className="guest-join-overlay" onClick={() => { setNeedsInteraction(false); playerRef.current?.playVideo(); }}>
-          <div className="join-content"><p>Sincronizar com a Sala</p></div>
+          <div className="join-content"><p>Sincronizar com o Host</p></div>
         </div>
       )}
     </div>
