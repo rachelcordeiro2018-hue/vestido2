@@ -32,9 +32,26 @@ function App() {
   const { setUser, setInitialized } = useStore();
 
   useEffect(() => {
+    const syncUserProfile = async (user: any) => {
+      if (!user) return;
+      
+      // Auto-upsert profile to ensure public.users row exists for FKs
+      const { error } = await supabase
+        .from('users')
+        .upsert({
+          id: user.id,
+          name: user.user_metadata?.full_name || user.email?.split('@')[0],
+          avatar_url: user.user_metadata?.avatar_url,
+          last_seen_at: new Date().toISOString()
+        }, { onConflict: 'id' });
+      
+      if (error) console.error('Error syncing profile:', error);
+    };
+
     // Initial check
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
+        syncUserProfile(session.user);
         setUser({
           id: session.user.id,
           email: session.user.email ?? '',
@@ -45,8 +62,11 @@ function App() {
       setInitialized(true);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
+        if (event === 'SIGNED_IN' || event === 'USER_UPDATED' || event === 'INITIAL_SESSION') {
+          syncUserProfile(session.user);
+        }
         setUser({
           id: session.user.id,
           email: session.user.email ?? '',

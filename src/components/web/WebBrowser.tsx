@@ -37,7 +37,8 @@ export function WebBrowser({ onClose }: WebBrowserProps) {
     if (!error && data) {
       navigate(`/room/${data.id}`);
     } else {
-      alert('Tente copiar o link direto do vídeo/filme se possível.');
+      console.error(error);
+      alert('Erro ao criar sala: ' + (error?.message || 'Tente copiar o link direto do vídeo/filme se possível.'));
     }
   };
 

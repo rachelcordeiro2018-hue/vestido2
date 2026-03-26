@@ -109,7 +109,7 @@ export function YoutubeBrowser({ onClose, mode = 'create', roomId }: YoutubeBrow
       navigate(`/room/${data.id}`);
     } else {
       console.error(error);
-      alert(`Erro ao criar sala.`);
+      alert(`Erro ao criar sala: ${error?.message || 'Erro desconhecido.'}`);
     }
   };
 

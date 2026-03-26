@@ -5,17 +5,24 @@ const supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-async function checkColumns() {
+async function checkRoomsTable() {
+  // We can't query information_schema with anon key usually, 
+  // but we can try to insert a dummy record and see the error or check columns via select.
+  
   const { data, error } = await supabase
     .from('rooms')
-    .select('video_id, current_video_time, is_playing, updated_at, privacy')
+    .select('*')
     .limit(1);
 
   if (error) {
-    console.error('ERROR RESPONSE:', JSON.stringify(error, null, 2));
+    console.error('Check Error:', error);
   } else {
-    console.log('SUCCESS! Columns found.');
+    console.log('Sample Room Data:', data[0]);
+    // Check if privacy exists and its value
+    if (data[0]) {
+        console.log('Privacy value type:', typeof data[0].privacy);
+    }
   }
 }
 
-checkColumns();
+checkRoomsTable();

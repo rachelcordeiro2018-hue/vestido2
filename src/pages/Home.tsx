@@ -141,7 +141,7 @@ export function Home() {
       navigate(`/room/${data.id}`);
     } else {
       console.error(error);
-      alert('Erro ao criar sala. Verifique o banco de dados.');
+      alert('Erro ao criar sala: ' + (error?.message || 'Erro desconhecido. No data returned.'));
     }
   };
 

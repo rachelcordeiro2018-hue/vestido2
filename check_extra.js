@@ -5,17 +5,16 @@ const supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-async function checkColumns() {
-  const { data, error } = await supabase
-    .from('rooms')
-    .select('video_id, current_video_time, is_playing, updated_at, privacy')
-    .limit(1);
-
-  if (error) {
-    console.error('ERROR RESPONSE:', JSON.stringify(error, null, 2));
-  } else {
-    console.log('SUCCESS! Columns found.');
-  }
+async function checkTriggers() {
+  // We can't query pg_trigger with anon key.
+  // But we can try to find if there is a 'privacy' column logic in Home.tsx that fails.
+  
+  // Wait, I already confirmed 'privacy' column exists.
+  
+  // Let's try to insert a room from this script with a known user (if I had one)
+  // but I don't.
+  
+  console.log("Checking if I can find any more SQL files...");
 }
 
-checkColumns();
+checkTriggers();
