@@ -30,7 +30,6 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
   const [roomState, setRoomState] = useState<any>(roomData || null);
   const [needsInteraction, setNeedsInteraction] = useState(!isHost);
 
-  // Funções de clique extraídas para evitar erro de build
   const handleAbsentClick = () => {
     setHostAbsent(false);
     if (playerRef.current && playerRef.current.playVideo) {
@@ -201,18 +200,20 @@ export function VideoPlayer({ roomId, isHost, roomData, onEnded }: VideoPlayerPr
         <div ref={containerRef}></div>
       </div>
       
-      {(!isHost && hostAbsent) && (
+      {!isHost && hostAbsent && (
         <div className="host-absent-overlay" onClick={handleAbsentClick}>
           <div className="absent-content">
             <p>O Host ficou ausente.</p>
-            <button className="absent-play-button">Dar play para continuar vendo</button>
+            <button className="absent-play-button" type="button">
+              Dar play para continuar vendo
+            </button>
           </div>
         </div>
       )}
 
-      {(!isHost && needsInteraction) && (
+      {!isHost && needsInteraction && (
         <div className="guest-join-overlay" onClick={handleJoinClick}>
           <div className="join-content">
             <div className="pulse-button">
               <svg viewBox="0 0 24 24" fill="currentColor" width="40" height="40">
-                <path
+                <path d="M8
